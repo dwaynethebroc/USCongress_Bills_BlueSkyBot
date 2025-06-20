@@ -9,6 +9,11 @@ import requests
 load_dotenv()
 GOV_KEY = os.getenv('GOV_API_KEY')
 
+#load pdf folder
+folder_path = "/Users/brocjohnson/repos/USCongress_Bills_BlueSkyBot/pdf"
+
+# Delete all existing PDFs in the folder
+
 #build the URL
 template = 'https://api.congress.gov/v3/congressional-record/?y=2022&m=6&d=28&api_key=[INSERT_KEY]'
 
@@ -35,10 +40,25 @@ if response.status_code == 200:
     x = response.json()
     print(x)
 
-    pdf_url = x["Results"]["Issues"][0]["Links"]["Digest"]["PDF"][0]["Url"]
-    print(pdf_url)   
+    digest_pdf_url = x["Results"]["Issues"][0]["Links"]["Digest"]["PDF"][0]["Url"]
+    print(digest_pdf_url)   
 else:
     print(f"Request failed with status code {response.status_code}")
     print(response.text)  # Print response for debugging
 
 
+response = requests.get(digest_pdf_url)
+
+if response.status_code == 200:
+    for filename in os.listdir(folder_path):
+        file_path = os.path.join(folder_path, filename)
+        if os.path.isfile(file_path):
+            os.remove(file_path)
+            print(filename, "is removed")
+            
+    with open(f"pdf/daily_digest_{day}.{month}.{year}.pdf", "wb") as f:
+        f.write(response.content)
+    print("PDF downloaded sucessfully")
+
+else:
+    print("Failed to download PDF")
