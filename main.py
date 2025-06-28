@@ -97,21 +97,52 @@ url = build_url()
 response = requests.get(url)
 
 def format_bills_paragraphs(text):
-    pattern = r'Pages? S\d{4}(?:–S\d{4})?'
-    chunks = re.split(pattern, text)
+    # Step 1: Clean text
+    text = re.sub(r'^Measures Passed:\s*', '', text.strip(), flags=re.IGNORECASE)
+    text = fix_hyphenation(text)
+
+    # Step 2: Separate patterns
+    pattern_range = r'Pages S\d{4}–(?:S?\d{2,4})'
+    pattern_single = r'Page S\d{4}'
+
+    # Find matches for both
+    matches = [
+        *re.finditer(pattern_range, text),
+        *re.finditer(pattern_single, text)
+    ]
+
+    # Sort matches by position in text
+    matches = sorted(matches, key=lambda m: m.start())
+
+    if not matches:
+        return [text.strip()]
 
     bills = []
-    for i in range(0, len(chunks) - 1, 2):
-        bill_text = chunks[i].strip()
-        page_tag = chunks[i + 1].strip()
-        if bill_text:
-            bills.append(f"{bill_text}\n{page_tag}")
+
+    # First bill: from start to end of first match
+    first_start = 0
+    first_end = matches[0].end()
+    bills.append(text[first_start:first_end].strip())
+
+    # Remaining bills: between page tags
+    for i in range(1, len(matches)):
+        start = matches[i - 1].end()
+        end = matches[i].end()
+        bill = text[start:end].strip()
+        if bill:
+            bills.append(bill)
+
+    # Last chunk: from end of last match to end of text
+    last = matches[-1]
+    final_chunk = text[last.end():].strip()
+    if final_chunk:
+        bills.append(f"{last.group()} {final_chunk}".strip())
 
     return bills
 
-
-
-
+def fix_hyphenation(text):
+    fixed_text = re.sub(r'(\w+)-\s+(\w+)', r'\1\2', text)
+    return fixed_text
 
 if response.status_code != 200:
     print(f"API Request failed: {response.status_code}")
@@ -141,5 +172,14 @@ extracted_text = ""
 if download_pdf(digest_pdf_url, pdf_path):
     extracted_text = extract_text_from_pdf(pdf_path)
     print("\n📝 Extracted Text Snippet:\n", extracted_text[:1000])
+    #format and separate bills into array
     bills = format_bills_paragraphs(extracted_text)
-    print(bills)
+    
+    fix_hyphenation_bills = []
+    for bill in bills:
+        hyphen_bill = fix_hyphenation(bill)
+        fix_hyphenation_bills.append(hyphen_bill)
+    
+    for fBills in fix_hyphenation_bills:
+        print("==== Bill ====")
+        print(f"\n{fBills}\n")
