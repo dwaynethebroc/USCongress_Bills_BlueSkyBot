@@ -21,7 +21,7 @@ yesterday = today - timedelta(days = 1)
 year = yesterday.year
 month = yesterday.month
 #day = yesterday.day
-day = 25
+day = 27
 
 def build_url():
     #build the URL
@@ -94,56 +94,78 @@ def extract_text_from_pdf(pdf_file: str) -> str:
 
     except Exception as e:
         return f"❌ Error reading PDF: {e}"
-url = build_url()
-response = requests.get(url)
+
+def fix_hyphenation(text):
+    fixed_text = re.sub(r'(\w+)-\s+(\w+)', r'\1\2', text)
+    return fixed_text
 
 def format_bills_paragraphs(text):
-    # Step 1: Clean text
+    # Step 1: Remove the "Measures Passed:" header and fix hyphenation artifacts
     text = re.sub(r'^Measures Passed:\s*', '', text.strip(), flags=re.IGNORECASE)
     text = fix_hyphenation(text)
 
-    # Step 2: Separate patterns
-    pattern_range = r'Pages S\d{4}–(?:S?\d{2,4})'
-    pattern_single = r'Page S\d{4}'
-
-    # Find matches for both
-    matches = [
-        *re.finditer(pattern_range, text),
-        *re.finditer(pattern_single, text)
+    # Step 2: Define known end flags that terminate the section
+    end_flags = [
+        "Measures Considered:",
+        "Nominations",
+        "Appointments",
+        "Nomination--Agreement",
+        "Nomination--Cloture",
+        "Additional Cosponsors",
+        "Additional Statements"
     ]
 
-    # Sort matches by position in text
-    matches = sorted(matches, key=lambda m: m.start())
+    # Step 3: Truncate text after the first end flag (inclusive)
+    for flag in end_flags:
+        idx = text.find(flag)
+        if idx != -1:
+            text = text[:idx + len(flag)].strip()
+            break
+
+    # Step 4: Match both single and range-style page tags
+    pattern_range = r'Pages S\d{4}–(?:S?\d{2,4})'
+    pattern_single = r'Page S\d{4}'
+    matches = sorted(
+        [*re.finditer(pattern_range, text), *re.finditer(pattern_single, text)],
+        key=lambda m: m.start()
+    )
 
     if not matches:
         return [text.strip()]
 
     bills = []
 
-    # First bill: from start to end of first match
-    first_start = 0
-    first_end = matches[0].end()
-    bills.append(text[first_start:first_end].strip())
+    # First bill: from start to first page tag end
+    bills.append(text[:matches[0].end()].strip())
 
-    # Remaining bills: between page tags
+    # Intermediate bills: between previous and current page tag
     for i in range(1, len(matches)):
-        start = matches[i - 1].end()
-        end = matches[i].end()
-        bill = text[start:end].strip()
-        if bill:
-            bills.append(bill)
+        prev_end = matches[i - 1].end()
+        curr_end = matches[i].end()
+        bills.append(text[prev_end:curr_end].strip())
 
-    # Last chunk: from end of last match to end of text
-    last = matches[-1]
-    final_chunk = text[last.end():].strip()
-    if final_chunk:
-        bills.append(f"{last.group()} {final_chunk}".strip())
+    # Step 5: Handle any extra content after the last page tag
+    last_match = matches[-1]
+    after_last_tag = text[last_match.end():].strip()
+
+    if after_last_tag and not any(flag in after_last_tag for flag in end_flags):
+        # Only append if it's legitimate content (not headings or garbage)
+        bills[-1] += " " + after_last_tag
+    elif after_last_tag and not re.search(r'\w{4,}', after_last_tag):
+        # It's just short or meaningless trailing junk (like "Kies") — ignore it
+        pass
+    elif not after_last_tag:
+        # Nothing more to add
+        pass
+    else:
+        # If the final text is something unrelated, drop the last bill altogether
+        bills = bills[:-1]
 
     return bills
 
-def fix_hyphenation(text):
-    fixed_text = re.sub(r'(\w+)-\s+(\w+)', r'\1\2', text)
-    return fixed_text
+# ==== Main Program ====
+url = build_url()
+response = requests.get(url)
 
 if response.status_code != 200:
     print(f"API Request failed: {response.status_code}")
