@@ -21,7 +21,7 @@ yesterday = today - timedelta(days = 1)
 year = yesterday.year
 month = yesterday.month
 #day = yesterday.day
-day = 12
+day = 25
 
 def build_url():
     #build the URL
@@ -77,8 +77,9 @@ def extract_text_from_pdf(pdf_file: str) -> str:
             "Measures Considered:",
             "Nominations",
             "Appointments",
-            "Nomination--Agreement",
-            "Nomination--Cloture"
+            "Nomination—Agreement:",
+            "Nomination—Cloture",
+            "Nomination Confirmed:"
         ]
 
         # Track minimum ending index
