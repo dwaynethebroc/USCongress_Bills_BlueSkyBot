@@ -6,6 +6,7 @@ import os
 import json
 import requests
 import re
+from atproto import Client
 
 #load env variables
 load_dotenv()
@@ -14,16 +15,54 @@ GOV_KEY = os.getenv('GOV_API_KEY')
 #load pdf folder
 folder_path = "/Users/brocjohnson/repos/USCongress_Bills_BlueSkyBot/pdf"
 
-
 #get the current day
 today = datetime.now()
 yesterday = today - timedelta(days = 1)
 year = yesterday.year
 month = yesterday.month
-#day = yesterday.day
-day = 27
+# day = yesterday.day
+day = 24
 
-def build_url():
+#BlueSky
+client = Client()
+user_name = os.getenv('BLUESKY_NAME')
+password = os.getenv('BLUESKY_PASS')
+
+def post_to_blueSky(message):
+    client.login(user_name, password)
+    client.send_post(text=message)
+
+def check_DIS():
+    #check if date exists in days-in-session calendar
+    day_in_session_flag = False
+
+    dis_month = month
+    dis_day = day
+
+    #convert to same day, month format as json file
+    if int(dis_month) > 0 and int(dis_month) < 10:
+        dis_month = "0" + str(dis_month)
+
+    if int(dis_day) > 0 and int(dis_day) < 10:
+        dis_day = "0" + str(dis_day)
+
+    #reformat date to double digit month, day always ex: 06, 09, etc
+    json_format_current_day = f"{year}-{dis_month}-{dis_day}"
+
+    with open('session_days_2025.json', 'r') as f:
+        data = json.load(f)
+
+        dates_in_session = data["DiS_2025"]
+
+        if json_format_current_day in dates_in_session:
+            day_in_session_flag = True
+            print("Yesterday was a day in session in congress")
+        else:
+            print("Yesterday was not a day in congress")
+
+    return day_in_session_flag
+
+def build_url_daily_digest():
     #build the URL
     template = 'https://api.congress.gov/v3/congressional-record/?y=2022&m=6&d=28&api_key=[INSERT_KEY]'
 
@@ -163,46 +202,106 @@ def format_bills_paragraphs(text):
 
     return bills
 
+def make_final_tweet(billArray):
+        final_tweet = f"BILLS THAT WERE PASSED TODAY IN CONGRESS: {month}-{day}-{year}\n"
+        fix_hyphenation_bills = []
+        for bill in billArray:
+            hyphen_bill = fix_hyphenation(bill)
+            fix_hyphenation_bills.append(hyphen_bill)
+    
+        # Regex pattern to extract bill name (covers House and Senate bill/resolution formats)
+        # bill_pattern = re.compile(r'\b(H(?:\.|ouse)?\.?\s*(?:R|Res|J\.?\s*Res)\.?\s*\d+|S(?:\.|enate)?\.?\s*(?:J\.?\s*Res|Res)?\.?\s*\d+)')
+        bill_pattern = re.compile(
+            r'\b(?P<prefix>H(?:\.|ouse)?\.?\s*(?:R|Res|J\.?\s*Res)|S(?:\.|enate)?\.?\s*(?:J\.?\s*Res|Res)?)\.?\s*(?P<number>\d+)\b',
+            re.IGNORECASE
+        )
+
+        for fBills in fix_hyphenation_bills:
+            match = bill_pattern.search(fBills)
+            bill_type = match.group("prefix")
+            bill_number = match.group("number")
+
+
+            final_tweet += f"\n==== {bill_type + " " + bill_number} ===="
+            final_tweet += f"\n{fBills}\n"
+
+            #todo: slice off everything in bill after page number, 
+            # save page number as variable to input into build_URL_bill
+            #needs to match the numbers and Letter of H or S exactly 
+            if match:
+                houseOrSenate = bill_type[0:1]
+                print(bill_type)
+                print(bill_number)
+                print(houseOrSenate)
+                final_tweet += f"\n Link to full bill: " + build_URL_bill(houseOrSenate, bill_number)
+
+        return final_tweet
+    
+def build_URL_bill(houseOrSenate, bill_number):
+    #URL will need to be adjusted with future congresses to function after 2025
+    houseBaseURL = f"https://www.congress.gov/bill/119th-congress/house-bill/{bill_number}"
+    senateBaseURL = f"https://www.congress.gov/bill/119th-congress/senate-bill/{bill_number}"
+
+    if(houseOrSenate[0:1] == "H"):
+        return houseBaseURL
+    elif(houseOrSenate[0:1] == "S"):
+        return senateBaseURL
+    else:
+        return ""
+
+
+
 # ==== Main Program ====
-url = build_url()
-response = requests.get(url)
 
-if response.status_code != 200:
-    print(f"API Request failed: {response.status_code}")
-    print(response.text)
-    exit()
-
-try:
-    digest_pdf_url = response.json()["Results"]["Issues"][0]["Links"]["Digest"]["PDF"][0]["Url"]
-    print("PDF URL:", digest_pdf_url)
-except (KeyError, IndexError) as e:
-    print("❌ Error parsing API response:", e)
-    exit()
-
-# Clean up old PDFs
-for f in os.listdir(folder_path):
-    try:
-        os.remove(os.path.join(folder_path, f))
-        print(f"Removed old PDF: {f}")
-    except Exception as e:
-        print(f"❌ Could not delete file {f}: {e}")
-
-
-# Download new PDF
 pdf_path = os.path.join(folder_path, f"daily_digest_{day}.{month}.{year}.pdf")
-extracted_text = ""
 
-if download_pdf(digest_pdf_url, pdf_path):
-    extracted_text = extract_text_from_pdf(pdf_path)
-    print("\n📝 Extracted Text Snippet:\n", extracted_text[:1000])
-    #format and separate bills into array
-    bills = format_bills_paragraphs(extracted_text)
-    
-    fix_hyphenation_bills = []
-    for bill in bills:
-        hyphen_bill = fix_hyphenation(bill)
-        fix_hyphenation_bills.append(hyphen_bill)
-    
-    for fBills in fix_hyphenation_bills:
-        print("==== Bill ====")
-        print(f"\n{fBills}\n")
+#if yesterday was an active day in session
+DIS_flag = check_DIS()
+
+if(DIS_flag):
+    #if PDF file already exists for the requested day, 
+    # do not download the file again and instead return the formatted Measures Passed section:
+    if os.path.isfile(pdf_path):
+        print("PDF already exists")
+
+        extracted_text = extract_text_from_pdf(pdf_path)
+        #format and separate bills into array
+        bills = format_bills_paragraphs(extracted_text)
+
+        final_tweet = make_final_tweet(bills)
+        print(final_tweet)
+        
+    else:
+        print("PDF does not exist")
+        url = build_url_daily_digest()
+        response = requests.get(url)
+
+        if response.status_code != 200:
+            print(f"API Request failed: {response.status_code}")
+            print(response.text)
+            exit()
+
+        try:
+            digest_pdf_url = response.json()["Results"]["Issues"][0]["Links"]["Digest"]["PDF"][0]["Url"]
+            print("PDF URL:", digest_pdf_url)
+        except (KeyError, IndexError) as e:
+            print("❌ Error parsing API response:", e)
+            exit()
+
+        # Clean up old PDFs
+        for f in os.listdir(folder_path):
+            try:
+                os.remove(os.path.join(folder_path, f))
+                print(f"Removed old PDF: {f}")
+            except Exception as e:
+                print(f"❌ Could not delete file {f}: {e}")
+
+        if download_pdf(digest_pdf_url, pdf_path):
+            extracted_text = extract_text_from_pdf(pdf_path)
+            print("\n📝 Extracted Text Snippet:\n", extracted_text[:1000])
+            #format and separate bills into array
+            bills = format_bills_paragraphs(extracted_text)
+
+            final_tweet = make_final_tweet(bills)
+            print(final_tweet)
+
