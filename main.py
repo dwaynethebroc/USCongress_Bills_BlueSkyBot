@@ -20,8 +20,8 @@ today = datetime.now()
 yesterday = today - timedelta(days = 1)
 year = yesterday.year
 month = yesterday.month
-# day = yesterday.day
-day = 24
+#day = yesterday.day
+day = 29
 
 #BlueSky
 client = Client()
@@ -128,8 +128,24 @@ def extract_text_from_pdf(pdf_file: str) -> str:
             if idx != -1 and idx < min_end_index:
                 min_end_index = idx
 
-        section = cleaned_text[start_index:min_end_index].strip()
-        return section
+        senate_text = cleaned_text[start_index:min_end_index].strip()
+
+        # === Extract House Section ===
+        house_text = ""
+        house_start = cleaned_text.find("House of Representatives")
+        if house_start != -1:
+            house_end = cleaned_text.find("Extensions of Remarks", house_start)
+            house_text = cleaned_text[house_start:house_end].strip() if house_end != -1 else cleaned_text[house_start:]
+
+        formatted_house_text = splice_house_text_paragraphs(house_text)
+        print(formatted_house_text)
+
+        combined_text += "------Senate------"
+        combined_text += f"{senate_text}\n"
+        combined_text += "------House------"
+        combined_text += f"{formatted_house_text}\n"
+
+        return combined_text
 
     except Exception as e:
         return f"❌ Error reading PDF: {e}"
@@ -230,10 +246,11 @@ def make_final_tweet(billArray):
             #needs to match the numbers and Letter of H or S exactly 
             if match:
                 houseOrSenate = bill_type[0:1]
+                billURL = build_URL_bill(houseOrSenate, bill_number)
                 print(bill_type)
                 print(bill_number)
                 print(houseOrSenate)
-                final_tweet += f"\n Link to full bill: " + build_URL_bill(houseOrSenate, bill_number)
+                final_tweet += f"\nLink to full bill: {billURL}\n"
 
         return final_tweet
     
@@ -249,6 +266,80 @@ def build_URL_bill(houseOrSenate, bill_number):
     else:
         return ""
 
+def splice_house_text_paragraphs(text):
+    """
+    Extracts structured info for passed/agreed-to House bills or rules that enable bill consideration.
+    Only includes the main bill mentioned, storing only the numeric part as 'bill_num'.
+    """
+
+    # === 1. End flags to stop parsing ===
+    end_flags = [
+        "Extensions of Remarks",
+        "Committee Meetings",
+        "Next Meeting",
+        "Senate Referrals",
+        "Committee Ranking",
+        "Quorum Calls",
+        "Adjournment",
+    ]
+
+    # === 2. Truncate text at the first end flag ===
+    lower_text = text.lower()
+    min_index = len(text)
+    for flag in end_flags:
+        idx = lower_text.find(flag.lower())
+        if idx != -1 and idx < min_index:
+            min_index = idx
+
+    house_text = text[:min_index].strip()
+
+    # === 3. Match each bill-related action block ===
+    block_pattern = re.compile(
+        r'(?P<title>.*?[.:])\s*'
+        r'(?P<action_block>'
+        r'(?:The House|House)\s+'
+        r'(agreed to|passed|approved)\s+'
+        r'(?:the\s+)?(?:resolution|bill)?\s*'
+        r'(?P<res_bill>(H\.R\.|H\.Res\.|H\.J\. Res\.)\s*\d+)[\s\S]*?)'
+        r'(?=(?:The House|House)\s+(?:agreed to|passed|approved)|' + '|'.join(end_flags) + r'|$)',
+        re.IGNORECASE
+    )
+
+    results = []
+
+    for match in block_pattern.finditer(house_text):
+        title = match.group("title").strip()
+        action_block = match.group("action_block").strip()
+
+        # Extract the first full bill ID and its number
+        bill_match = re.search(r'\b(H\.R\.|H\.Res\.|H\.J\. Res\.)\s*(\d+)\b', action_block)
+        if not bill_match:
+            continue
+
+        bill_num = bill_match.group(2)  # only the number (e.g., '3944')
+
+        # Only include relevant legislative actions
+        if (
+            'providing for consideration of the bill' in action_block.lower()
+            or 'impeaching' in title.lower()
+        ):
+            results.append({
+                "bill_num": bill_num,
+                "title": title,
+                "text": action_block
+            })
+
+    formatted_text = format_house_text(results)
+    return formatted_text
+
+def format_house_text(resultsObj):
+    final_text = ""
+    for results in resultsObj:
+        final_text += f"====={results.title}=====\n"
+        final_text += f"{results.text}\n"
+        final_text += build_URL_bill(results.title, results.bill_num)
+    
+    return final_text
 
 
 # ==== Main Program ====
