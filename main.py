@@ -22,7 +22,7 @@ year = yesterday.year
 month = 6
 # month = yesterday.month
 #day = yesterday.day
-day = 24
+day = 5
 
 #BlueSky
 client = Client()
@@ -64,12 +64,6 @@ def check_DIS():
     return day_in_session_flag
 
 def build_url_daily_digest():
-    #build the URL
-    template = 'https://api.congress.gov/v3/congressional-record/?y=2022&m=6&d=28&api_key=[INSERT_KEY]'
-
-    print(day, month, year)
-
-
     #build the URL
     begURL = 'https://api.congress.gov/v3/congressional-record?format=json'
     date_string = f'&y={year}&m={month}&d={day}&'
@@ -139,9 +133,6 @@ def extract_text_from_pdf(pdf_file: str) -> str:
             house_text = cleaned_text[house_start:house_end].strip() if house_end != -1 else cleaned_text[house_start:]
 
         formatted_house_text = splice_house_text_paragraphs(house_text)
-        print(formatted_house_text)
-
-        print(senate_text)
 
         return senate_text, formatted_house_text
 
@@ -152,7 +143,7 @@ def fix_hyphenation(text):
     fixed_text = re.sub(r'(\w+)-\s+(\w+)', r'\1\2', text)
     return fixed_text
 
-def format_bills_paragraphs(text):
+def make_senate_bills_array(text):
     # Step 1: Remove the "Measures Passed:" header and fix hyphenation artifacts
     text = re.sub(r'^Measures Passed:\s*', '', text.strip(), flags=re.IGNORECASE)
     text = fix_hyphenation(text)
@@ -216,7 +207,7 @@ def format_bills_paragraphs(text):
 
     return bills
 
-def make_final_tweet(billArray, house_text):
+def make_final_tweet(billArray, house_text, sourceURL):
         final_tweet = f"BILLS THAT WERE PASSED TODAY IN CONGRESS: {month}-{day}-{year}\n"
         final_tweet += "\n------Senate------\n"
         fix_hyphenation_bills = []
@@ -250,6 +241,11 @@ def make_final_tweet(billArray, house_text):
 
         final_tweet += "\n------House------\n"
         final_tweet += f"\n{house_text}\n"
+
+        #CREDITS BLOCK
+        githubProjectLink = "https://github.com/dwaynethebroc/USCongress_Bills_BlueSkyBot"
+        final_tweet += f"\nTo read the full source of all bills: {sourceURL}\n"
+        final_tweet += f"\nProject created and maintained here: {githubProjectLink}\n"
         return final_tweet
     
 def build_URL_bill(houseOrSenate, bill_number):
@@ -322,18 +318,21 @@ def splice_house_text_paragraphs(text):
         })
 
     formatted_text = format_house_text(results)
-    print("FORMATTED TEXT:", formatted_text)
     return formatted_text
 
-def format_house_text(resultsObj):
+def format_house_text(houseBillArray):
     final_text = ""
-    for results in resultsObj:
-        final_text += f"\n====={results["title"]}=====\n"
-        final_text += f"{results["text"]}\n"
-        final_text += "Link to the full bill: " + build_URL_bill("H", results["bill_num"]) + "\n"
-    
-    return final_text
 
+    if houseBillArray == []:
+        final_text = "\nNo measures were passed in the house today\n"
+    else:
+        for results in houseBillArray:
+            final_text += f"\n====={results["title"]}=====\n"
+            final_text += f"{results["text"]}\n"
+            final_text += "\nLink to the full bill: " + build_URL_bill("H", results["bill_num"]) + "\n"
+    
+    #credit line for where to source daily digest and "created by Broc - github link"
+    return final_text
 
 # ==== Main Program ====
 
@@ -348,27 +347,18 @@ if(DIS_flag):
     if os.path.isfile(pdf_path):
         print("PDF already exists")
 
-        # senate_text, house_text = extract_text_from_pdf(pdf_path)
-        result = extract_text_from_pdf(pdf_path)
-        print("Raw result from extract_text_from_pdf():", repr(result))  # use repr to see exact string content and type
-
-        if isinstance(result, tuple) and len(result) == 2:
-            senate_text, house_text = result
-        else:
-            print("Error or unexpected return from extract_text_from_pdf():", result)
-            exit(1)
-        #format and separate bills into array
-        bills = format_bills_paragraphs(senate_text)
-        print(house_text)
-        final_tweet = make_final_tweet(bills, house_text)
+        url = build_url_daily_digest()
+        senate_text, house_text = extract_text_from_pdf(pdf_path)
+        bills_senate = make_senate_bills_array(senate_text)
+        final_tweet = make_final_tweet(bills_senate, house_text, url)
         print(final_tweet)
         
     else:
         print("PDF does not exist")
+
         url = build_url_daily_digest()
         print(url)
         response = requests.get(url)
-        print(json.dumps(response.json(), indent=2))
 
 
         if response.status_code != 200:
@@ -393,9 +383,7 @@ if(DIS_flag):
 
         if download_pdf(digest_pdf_url, pdf_path):
             senate_text, house_text = extract_text_from_pdf(pdf_path)
-            #format and separate bills into array
-            bills = format_bills_paragraphs(senate_text)
-            print(house_text)
-            final_tweet = make_final_tweet(bills, house_text)
+            bills_senate = make_senate_bills_array(senate_text)
+            final_tweet = make_final_tweet(bills_senate, house_text, url)
             print(final_tweet)
 
