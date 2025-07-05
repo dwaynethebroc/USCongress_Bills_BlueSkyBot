@@ -19,7 +19,8 @@ folder_path = "/Users/brocjohnson/repos/USCongress_Bills_BlueSkyBot/pdf"
 today = datetime.now()
 yesterday = today - timedelta(days = 1)
 year = yesterday.year
-month = yesterday.month
+month = 6
+# month = yesterday.month
 #day = yesterday.day
 day = 24
 
@@ -140,6 +141,7 @@ def extract_text_from_pdf(pdf_file: str) -> str:
         formatted_house_text = splice_house_text_paragraphs(house_text)
         print(formatted_house_text)
 
+        print(senate_text)
 
         return senate_text, formatted_house_text
 
@@ -216,6 +218,7 @@ def format_bills_paragraphs(text):
 
 def make_final_tweet(billArray, house_text):
         final_tweet = f"BILLS THAT WERE PASSED TODAY IN CONGRESS: {month}-{day}-{year}\n"
+        final_tweet += "\n------Senate------\n"
         fix_hyphenation_bills = []
         for bill in billArray:
             hyphen_bill = fix_hyphenation(bill)
@@ -234,7 +237,7 @@ def make_final_tweet(billArray, house_text):
             bill_number = match.group("number")
 
 
-            final_tweet += f"\n==== {bill_type} + " " + {bill_number} ===="
+            final_tweet += f"\n==== {bill_type} {bill_number} ===="
             final_tweet += f"\n{fBills}\n"
 
             #todo: slice off everything in bill after page number, 
@@ -243,13 +246,10 @@ def make_final_tweet(billArray, house_text):
             if match:
                 houseOrSenate = bill_type[0:1]
                 billURL = build_URL_bill(houseOrSenate, bill_number)
-                print(bill_type)
-                print(bill_number)
-                print(houseOrSenate)
                 final_tweet += f"\nLink to full bill: {billURL}\n"
 
-        final_tweet += "------House------"
-        final_tweet += f"\n{formatted_house_text}\n"
+        final_tweet += "\n------House------\n"
+        final_tweet += f"\n{house_text}\n"
         return final_tweet
     
 def build_URL_bill(houseOrSenate, bill_number):
@@ -290,52 +290,47 @@ def splice_house_text_paragraphs(text):
             min_index = idx
 
     house_text = text[:min_index].strip()
+    house_text = re.sub(r'\s+', ' ', house_text)  # normalize whitespace
 
-    # === 3. Match each bill-related action block ===
+    # === 3. Match each action block mentioning a bill ===
     block_pattern = re.compile(
-        r'(?P<title>.*?[.:])\s*'
         r'(?P<action_block>'
-        r'(?:The House|House)\s+'
-        r'(agreed to|passed|approved)\s+'
-        r'(?:the\s+)?(?:resolution|bill)?\s*'
-        r'(?P<res_bill>(H\.R\.|H\.Res\.|H\.J\. Res\.)\s*\d+)[\s\S]*?)'
-        r'(?=(?:The House|House)\s+(?:agreed to|passed|approved)|' + '|'.join(end_flags) + r'|$)',
-        re.IGNORECASE
+            r'(?:The House|House)\s+'
+            r'(?:agreed to|passed|approved)\s+.*?'
+            r'(?:H\.R\.|H\.Res\.|H\.J\. Res\.)\s*\d+.*?(?=[.?!])'
+        r')',
+        re.IGNORECASE | re.DOTALL
     )
 
     results = []
 
     for match in block_pattern.finditer(house_text):
-        title = match.group("title").strip()
-        action_block = match.group("action_block").strip()
+        action_block = fix_hyphenation(match.group("action_block").strip())
 
-        # Extract the first full bill ID and its number
+        # Extract bill identifier and number
         bill_match = re.search(r'\b(H\.R\.|H\.Res\.|H\.J\. Res\.)\s*(\d+)\b', action_block)
         if not bill_match:
             continue
 
-        bill_num = bill_match.group(2)  # only the number (e.g., '3944')
+        bill_prefix = bill_match.group(1)
+        bill_num = bill_match.group(2)
 
-        # Only include relevant legislative actions
-        if (
-            'providing for consideration of the bill' in action_block.lower()
-            or 'impeaching' in title.lower()
-        ):
-            results.append({
-                "bill_num": bill_num,
-                "title": title,
-                "text": action_block
-            })
+        results.append({
+            "bill_num": bill_num,
+            "title": f"{bill_prefix} {bill_num}",
+            "text": action_block
+        })
 
     formatted_text = format_house_text(results)
+    print("FORMATTED TEXT:", formatted_text)
     return formatted_text
 
 def format_house_text(resultsObj):
     final_text = ""
     for results in resultsObj:
-        final_text += f"====={results.title}=====\n"
-        final_text += f"{results.text}\n"
-        final_text += build_URL_bill("H", results.bill_num)
+        final_text += f"\n====={results["title"]}=====\n"
+        final_text += f"{results["text"]}\n"
+        final_text += "Link to the full bill: " + build_URL_bill("H", results["bill_num"]) + "\n"
     
     return final_text
 
@@ -353,17 +348,28 @@ if(DIS_flag):
     if os.path.isfile(pdf_path):
         print("PDF already exists")
 
-        senate_text, house_text = extract_text_from_pdf(pdf_path)
+        # senate_text, house_text = extract_text_from_pdf(pdf_path)
+        result = extract_text_from_pdf(pdf_path)
+        print("Raw result from extract_text_from_pdf():", repr(result))  # use repr to see exact string content and type
+
+        if isinstance(result, tuple) and len(result) == 2:
+            senate_text, house_text = result
+        else:
+            print("Error or unexpected return from extract_text_from_pdf():", result)
+            exit(1)
         #format and separate bills into array
         bills = format_bills_paragraphs(senate_text)
-
+        print(house_text)
         final_tweet = make_final_tweet(bills, house_text)
         print(final_tweet)
         
     else:
         print("PDF does not exist")
         url = build_url_daily_digest()
+        print(url)
         response = requests.get(url)
+        print(json.dumps(response.json(), indent=2))
+
 
         if response.status_code != 200:
             print(f"API Request failed: {response.status_code}")
@@ -387,7 +393,9 @@ if(DIS_flag):
 
         if download_pdf(digest_pdf_url, pdf_path):
             senate_text, house_text = extract_text_from_pdf(pdf_path)
-            print("\n📝 Extracted Text Snippet:\n", senate_text[:1000])
+            #format and separate bills into array
             bills = format_bills_paragraphs(senate_text)
+            print(house_text)
             final_tweet = make_final_tweet(bills, house_text)
+            print(final_tweet)
 
