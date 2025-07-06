@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from datetime import timedelta
 from dotenv import load_dotenv
 import pypdf
@@ -31,58 +31,84 @@ password = os.getenv('BLUESKY_PASS')
 
 def post_to_blueSky(message):
     client.login(user_name, password)
-    # client.send_post(text=message)
 
-    daily_message = message
-    lines_full_tweet = message.splitlines()
-
-    tweet_length = len(daily_message)
-    print(tweet_length)
-
-    if (tweet_length > 300):
-        print("Message over 300 characters, splitting into multiple posts")
-    else:
-        print("Message length: ", tweet_length)
-
-    blocks = []
-    current_block = []
-
-    for line in lines_full_tweet:
-        if line.startswith("==") and current_block:
-            blocks.append("\n".join(current_block))
-            current_block = []
-        current_block.append(line)
-
-    if current_block:
-        blocks.append("\n".join(current_block))
-
-    posts = []
+    posts = make_sub_tweets(message)
     post_count = 0
-    mini_tweet = ""
-    #6 characters of limit reserved for thread count i,e (1/40)
-    character_count = 294
 
-    for block in blocks:
-        # +1 to account for extra linebreak
-        if len(mini_tweet) + len(block) + 1 >= character_count:
-            posts.append(mini_tweet.strip())
-            mini_tweet = f"{block}\n"
-        else:
-            mini_tweet += f"{block}\n"
+    resp = requests.post(
+        "https://bsky.social/xrpc/com.atproto.server.createSession",
+        json={"identifier": user_name, "password": password},
+    )
 
-    if mini_tweet:
-        posts.append(mini_tweet.strip())
-        mini_tweet = ""
+    resp.raise_for_status()
+    session = resp.json()
+    print(session["accessJwt"])
 
-    #Reserves 6 characters for the post count with each segment c
+
     for post in posts:
         final_post_segment = ""
         post_count += 1
         final_post_segment += f"{post_count}/{len(posts)}\n"
         final_post_segment += post
         final_post_segment = final_post_segment.strip()
-        print(final_post_segment)
+
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        post = {
+            "$type": "app.bsky.feed.post",
+            "text": final_post_segment,
+            "createdAt": now
+            }
         
+        resp = requests.post(
+            "https://bsky.social/xrpc/com.atproto.repo.createRecord",
+            headers={"Authorization": "Bearer " + session["accessJwt"]},
+            json={
+                "repo": session["did"],
+                "collection": "app.bsky.feed.post",
+                "record": post,
+            },
+        )
+        print(json.dumps(resp.json(), indent=2))
+        resp.raise_for_status()
+
+        # The full repository path (including the auto-generated rkey) will be returned as a response to the createRecord request. It looks like:
+
+        # {
+        #   "uri": "at://did:plc:u5cwb2mwiv2bfq53cjufe6yn/app.bsky.feed.post/3k4duaz5vfs2b",
+        #   "cid": "bafyreibjifzpqj6o6wcq3hejh7y4z4z2vmiklkvykc57tw3pcbx3kxifpm"
+        # }
+        print(final_post_segment)
+        # client.send_post(text=message)
+
+#BLUESKY API FUNCTIONS
+def parse_mentions(text: str) -> List[Dict]:
+    spans = []
+    # regex based on: https://atproto.com/specs/handle#handle-identifier-syntax
+    mention_regex = rb"[$|\W](@([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)"
+    text_bytes = text.encode("UTF-8")
+    for m in re.finditer(mention_regex, text_bytes):
+        spans.append({
+            "start": m.start(1),
+            "end": m.end(1),
+            "handle": m.group(1)[1:].decode("UTF-8")
+        })
+    return spans
+
+def parse_urls(text: str) -> List[Dict]:
+    spans = []
+    # partial/naive URL regex based on: https://stackoverflow.com/a/3809435
+    # tweaked to disallow some training punctuation
+    url_regex = rb"[$|\W](https?:\/\/(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&//=]*[-a-zA-Z0-9@%_\+~#//=])?)"
+    text_bytes = text.encode("UTF-8")
+    for m in re.finditer(url_regex, text_bytes):
+        spans.append({
+            "start": m.start(1),
+            "end": m.end(1),
+            "url": m.group(1).decode("UTF-8"),
+        })
+    return spans
+
+#CONGRESS API FUNCTIONS
 def check_DIS():
     #check if date exists in days-in-session calendar
     day_in_session_flag = False
@@ -256,49 +282,7 @@ def make_senate_bills_array(text):
         bills = bills[:-1]
 
     return bills
-
-def make_final_tweet(billArray, house_text):
-        final_tweet = f"BILLS THAT WERE PASSED TODAY IN CONGRESS: {month}-{day}-{year}\n"
-        final_tweet += "\n------Senate------\n"
-        fix_hyphenation_bills = []
-        for bill in billArray:
-            hyphen_bill = fix_hyphenation(bill)
-            fix_hyphenation_bills.append(hyphen_bill)
-    
-        # Regex pattern to extract bill name (covers House and Senate bill/resolution formats)
-        # bill_pattern = re.compile(r'\b(H(?:\.|ouse)?\.?\s*(?:R|Res|J\.?\s*Res)\.?\s*\d+|S(?:\.|enate)?\.?\s*(?:J\.?\s*Res|Res)?\.?\s*\d+)')
-        bill_pattern = re.compile(
-            r'\b(?P<prefix>H(?:\.|ouse)?\.?\s*(?:R|Res|J\.?\s*Res)|S(?:\.|enate)?\.?\s*(?:J\.?\s*Res|Res)?)\.?\s*(?P<number>\d+)\b',
-            re.IGNORECASE
-        )
-
-        for fBills in fix_hyphenation_bills:
-            match = bill_pattern.search(fBills)
-            bill_type = match.group("prefix")
-            bill_number = match.group("number")
-
-
-            final_tweet += f"\n== {bill_type} {bill_number} =="
-            final_tweet += f"\n{fBills}\n"
-
-            #todo: slice off everything in bill after page number, 
-            # save page number as variable to input into build_URL_bill
-            #needs to match the numbers and Letter of H or S exactly 
-            if match:
-                houseOrSenate = bill_type[0:1]
-                billURL = build_URL_bill(houseOrSenate, bill_number)
-                final_tweet += f"\n{billURL}\n"
-
-        final_tweet += "\n------House------\n"
-        final_tweet += f"\n{house_text}\n"
-
-        #CREDITS BLOCK
-        githubProjectLink = "https://github.com/dwaynethebroc/USCongress_Bills_BlueSkyBot"
-        sourceURL = "https://www.congress.gov/congressional-record"
-        final_tweet += f"\nTo read the full source of all bills: {sourceURL}\n"
-        final_tweet += f"\nProject created and maintained here: {githubProjectLink}\n"
-        return final_tweet
-    
+ 
 def build_URL_bill(houseOrSenate, bill_number):
     #URL will need to be adjusted with future congresses to function after 2025
     houseBaseURL = f"https://www.congress.gov/bill/119th-congress/house-bill/{bill_number}"
@@ -385,6 +369,89 @@ def format_house_text(houseBillArray):
     #credit line for where to source daily digest and "created by Broc - github link"
     return final_text
 
+def make_final_tweet(billArray, house_text):
+        final_tweet = f"BILLS THAT WERE PASSED IN CONGRESS: {month}-{day}-{year}\n"
+        final_tweet += "\n------Senate------\n"
+        fix_hyphenation_bills = []
+        for bill in billArray:
+            hyphen_bill = fix_hyphenation(bill)
+            fix_hyphenation_bills.append(hyphen_bill)
+    
+        # Regex pattern to extract bill name (covers House and Senate bill/resolution formats)
+        # bill_pattern = re.compile(r'\b(H(?:\.|ouse)?\.?\s*(?:R|Res|J\.?\s*Res)\.?\s*\d+|S(?:\.|enate)?\.?\s*(?:J\.?\s*Res|Res)?\.?\s*\d+)')
+        bill_pattern = re.compile(
+            r'\b(?P<prefix>H(?:\.|ouse)?\.?\s*(?:R|Res|J\.?\s*Res)|S(?:\.|enate)?\.?\s*(?:J\.?\s*Res|Res)?)\.?\s*(?P<number>\d+)\b',
+            re.IGNORECASE
+        )
+
+        for fBills in fix_hyphenation_bills:
+            match = bill_pattern.search(fBills)
+            bill_type = match.group("prefix")
+            bill_number = match.group("number")
+
+
+            final_tweet += f"\n== {bill_type} {bill_number} =="
+            final_tweet += f"\n{fBills}\n"
+
+            #todo: slice off everything in bill after page number, 
+            # save page number as variable to input into build_URL_bill
+            #needs to match the numbers and Letter of H or S exactly 
+            if match:
+                houseOrSenate = bill_type[0:1]
+                billURL = build_URL_bill(houseOrSenate, bill_number)
+                final_tweet += f"\n{billURL}\n"
+
+        final_tweet += "\n------House------\n"
+        final_tweet += f"\n{house_text}\n"
+
+        #CREDITS BLOCK
+        githubProjectLink = "https://github.com/dwaynethebroc/USCongress_Bills_BlueSkyBot"
+        sourceURL = "https://www.congress.gov/congressional-record"
+        final_tweet += f"\nTo read the full source of all bills: {sourceURL}\n"
+        final_tweet += f"\nProject created and maintained here: {githubProjectLink}\n"
+        return final_tweet
+   
+def make_sub_tweets(finalTweet: str):
+    lines_full_tweet = finalTweet.splitlines()
+    tweet_length = len(finalTweet)
+    print(tweet_length)
+
+    if (tweet_length > 300):
+        print("Message over 300 characters, splitting into multiple posts")
+    else:
+        print("Message length: ", tweet_length)
+
+    blocks = []
+    current_block = []
+
+    for line in lines_full_tweet:
+        if line.startswith("==") and current_block:
+            blocks.append("\n".join(current_block))
+            current_block = []
+        current_block.append(line)
+
+    if current_block:
+        blocks.append("\n".join(current_block))
+
+    posts = []
+    mini_tweet = ""
+    #6 characters of limit reserved for thread count i,e (1/40)
+    character_count = 294
+
+    for block in blocks:
+        # +1 to account for extra linebreak
+        if len(mini_tweet) + len(block) + 1 >= character_count:
+            posts.append(mini_tweet.strip())
+            mini_tweet = f"{block}\n"
+        else:
+            mini_tweet += f"{block}\n"
+
+    if mini_tweet:
+        posts.append(mini_tweet.strip())
+        mini_tweet = ""
+
+    return posts
+
 def main():
     pdf_path = os.path.join(folder_path, f"daily_digest_{day}.{month}.{year}.pdf")
 
@@ -392,51 +459,51 @@ def main():
     DIS_flag = check_DIS()
 
     if(DIS_flag):
-    #if PDF file already exists for the requested day, 
-    # do not download the file again and instead return the formatted Measures Passed section:
-    if os.path.isfile(pdf_path):
-        print("PDF already exists")
+        #if PDF file already exists for the requested day, 
+        # do not download the file again and instead return the formatted Measures Passed section:
+        if os.path.isfile(pdf_path):
+            print("PDF already exists")
 
-        senate_text, house_text = extract_text_from_pdf(pdf_path)
-        bills_senate = make_senate_bills_array(senate_text)
-        final_tweet = make_final_tweet(bills_senate, house_text)
-
-        post_to_blueSky(final_tweet)
-        
-    else:
-        print("PDF does not exist")
-
-        url = build_url_daily_digest()
-        print(url)
-        response = requests.get(url)
-
-
-        if response.status_code != 200:
-            print(f"API Request failed: {response.status_code}")
-            print(response.text)
-            exit()
-
-        try:
-            digest_pdf_url = response.json()["Results"]["Issues"][0]["Links"]["Digest"]["PDF"][0]["Url"]
-            print("PDF URL:", digest_pdf_url)
-        except (KeyError, IndexError) as e:
-            print("❌ Error parsing API response:", e)
-            exit()
-
-        # Clean up old PDFs
-        for f in os.listdir(folder_path):
-            try:
-                os.remove(os.path.join(folder_path, f))
-                print(f"Removed old PDF: {f}")
-            except Exception as e:
-                print(f"❌ Could not delete file {f}: {e}")
-
-        if download_pdf(digest_pdf_url, pdf_path):
             senate_text, house_text = extract_text_from_pdf(pdf_path)
             bills_senate = make_senate_bills_array(senate_text)
             final_tweet = make_final_tweet(bills_senate, house_text)
 
             post_to_blueSky(final_tweet)
+            
+        else:
+            print("PDF does not exist")
+
+            url = build_url_daily_digest()
+            print(url)
+            response = requests.get(url)
+
+
+            if response.status_code != 200:
+                print(f"API Request failed: {response.status_code}")
+                print(response.text)
+                exit()
+
+            try:
+                digest_pdf_url = response.json()["Results"]["Issues"][0]["Links"]["Digest"]["PDF"][0]["Url"]
+                print("PDF URL:", digest_pdf_url)
+            except (KeyError, IndexError) as e:
+                print("❌ Error parsing API response:", e)
+                exit()
+
+            # Clean up old PDFs
+            for f in os.listdir(folder_path):
+                try:
+                    os.remove(os.path.join(folder_path, f))
+                    print(f"Removed old PDF: {f}")
+                except Exception as e:
+                    print(f"❌ Could not delete file {f}: {e}")
+
+            if download_pdf(digest_pdf_url, pdf_path):
+                senate_text, house_text = extract_text_from_pdf(pdf_path)
+                bills_senate = make_senate_bills_array(senate_text)
+                final_tweet = make_final_tweet(bills_senate, house_text)
+
+                post_to_blueSky(final_tweet)
 
 # ==== Main Program ====
 if __name__ == "__main__":
