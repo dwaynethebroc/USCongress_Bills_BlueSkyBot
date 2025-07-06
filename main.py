@@ -31,8 +31,58 @@ password = os.getenv('BLUESKY_PASS')
 
 def post_to_blueSky(message):
     client.login(user_name, password)
-    client.send_post(text=message)
+    # client.send_post(text=message)
 
+    daily_message = message
+    lines_full_tweet = message.splitlines()
+
+    tweet_length = len(daily_message)
+    print(tweet_length)
+
+    if (tweet_length > 300):
+        print("Message over 300 characters, splitting into multiple posts")
+    else:
+        print("Message length: ", tweet_length)
+
+    blocks = []
+    current_block = []
+
+    for line in lines_full_tweet:
+        if line.startswith("==") and current_block:
+            blocks.append("\n".join(current_block))
+            current_block = []
+        current_block.append(line)
+
+    if current_block:
+        blocks.append("\n".join(current_block))
+
+    posts = []
+    post_count = 0
+    mini_tweet = ""
+    #6 characters of limit reserved for thread count i,e (1/40)
+    character_count = 294
+
+    for block in blocks:
+        # +1 to account for extra linebreak
+        if len(mini_tweet) + len(block) + 1 >= character_count:
+            posts.append(mini_tweet.strip())
+            mini_tweet = f"{block}\n"
+        else:
+            mini_tweet += f"{block}\n"
+
+    if mini_tweet:
+        posts.append(mini_tweet.strip())
+        mini_tweet = ""
+
+    #Reserves 6 characters for the post count with each segment c
+    for post in posts:
+        final_post_segment = ""
+        post_count += 1
+        final_post_segment += f"{post_count}/{len(posts)}\n"
+        final_post_segment += post
+        final_post_segment = final_post_segment.strip()
+        print(final_post_segment)
+        
 def check_DIS():
     #check if date exists in days-in-session calendar
     day_in_session_flag = False
@@ -207,7 +257,7 @@ def make_senate_bills_array(text):
 
     return bills
 
-def make_final_tweet(billArray, house_text, sourceURL):
+def make_final_tweet(billArray, house_text):
         final_tweet = f"BILLS THAT WERE PASSED TODAY IN CONGRESS: {month}-{day}-{year}\n"
         final_tweet += "\n------Senate------\n"
         fix_hyphenation_bills = []
@@ -228,7 +278,7 @@ def make_final_tweet(billArray, house_text, sourceURL):
             bill_number = match.group("number")
 
 
-            final_tweet += f"\n==== {bill_type} {bill_number} ===="
+            final_tweet += f"\n== {bill_type} {bill_number} =="
             final_tweet += f"\n{fBills}\n"
 
             #todo: slice off everything in bill after page number, 
@@ -237,13 +287,14 @@ def make_final_tweet(billArray, house_text, sourceURL):
             if match:
                 houseOrSenate = bill_type[0:1]
                 billURL = build_URL_bill(houseOrSenate, bill_number)
-                final_tweet += f"\nLink to full bill: {billURL}\n"
+                final_tweet += f"\n{billURL}\n"
 
         final_tweet += "\n------House------\n"
         final_tweet += f"\n{house_text}\n"
 
         #CREDITS BLOCK
         githubProjectLink = "https://github.com/dwaynethebroc/USCongress_Bills_BlueSkyBot"
+        sourceURL = "https://www.congress.gov/congressional-record"
         final_tweet += f"\nTo read the full source of all bills: {sourceURL}\n"
         final_tweet += f"\nProject created and maintained here: {githubProjectLink}\n"
         return final_tweet
@@ -327,31 +378,30 @@ def format_house_text(houseBillArray):
         final_text = "\nNo measures were passed in the house today\n"
     else:
         for results in houseBillArray:
-            final_text += f"\n====={results["title"]}=====\n"
-            final_text += f"{results["text"]}\n"
-            final_text += "\nLink to the full bill: " + build_URL_bill("H", results["bill_num"]) + "\n"
+            final_text += f"\n== {results['title']} ==\n"
+            final_text += f"{results['text']}\n"
+            final_text += "\n" + build_URL_bill("H", results["bill_num"]) + "\n"
     
     #credit line for where to source daily digest and "created by Broc - github link"
     return final_text
 
-# ==== Main Program ====
+def main():
+    pdf_path = os.path.join(folder_path, f"daily_digest_{day}.{month}.{year}.pdf")
 
-pdf_path = os.path.join(folder_path, f"daily_digest_{day}.{month}.{year}.pdf")
+    #if yesterday was an active day in session
+    DIS_flag = check_DIS()
 
-#if yesterday was an active day in session
-DIS_flag = check_DIS()
-
-if(DIS_flag):
+    if(DIS_flag):
     #if PDF file already exists for the requested day, 
     # do not download the file again and instead return the formatted Measures Passed section:
     if os.path.isfile(pdf_path):
         print("PDF already exists")
 
-        url = build_url_daily_digest()
         senate_text, house_text = extract_text_from_pdf(pdf_path)
         bills_senate = make_senate_bills_array(senate_text)
-        final_tweet = make_final_tweet(bills_senate, house_text, url)
-        print(final_tweet)
+        final_tweet = make_final_tweet(bills_senate, house_text)
+
+        post_to_blueSky(final_tweet)
         
     else:
         print("PDF does not exist")
@@ -384,6 +434,11 @@ if(DIS_flag):
         if download_pdf(digest_pdf_url, pdf_path):
             senate_text, house_text = extract_text_from_pdf(pdf_path)
             bills_senate = make_senate_bills_array(senate_text)
-            final_tweet = make_final_tweet(bills_senate, house_text, url)
-            print(final_tweet)
+            final_tweet = make_final_tweet(bills_senate, house_text)
+
+            post_to_blueSky(final_tweet)
+
+# ==== Main Program ====
+if __name__ == "__main__":
+    main()
 
