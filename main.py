@@ -26,62 +26,77 @@ day = 5
 
 #BlueSky
 client = Client()
-user_name = os.getenv('BLUESKY_NAME')
-password = os.getenv('BLUESKY_PASS')
+
 
 def post_to_blueSky(message):
+    user_name = os.getenv('BLUESKY_NAME')
+    password = os.getenv('BLUESKY_PASS')
+
     client.login(user_name, password)
 
-    posts = make_sub_tweets(message)
-    post_count = 0
-
-    resp = requests.post(
+    session_resp = requests.post(
         "https://bsky.social/xrpc/com.atproto.server.createSession",
         json={"identifier": user_name, "password": password},
     )
 
-    resp.raise_for_status()
-    session = resp.json()
-    print(session["accessJwt"])
+    session_resp.raise_for_status()
+    session = session_resp.json()
+    access_token = session["accessJwt"]
+    did = session["did"]
 
+    print("Logged in to Bluesky")
 
-    for post in posts:
-        final_post_segment = ""
-        post_count += 1
-        final_post_segment += f"{post_count}/{len(posts)}\n"
-        final_post_segment += post
-        final_post_segment = final_post_segment.strip()
+    posts = make_sub_tweets(message)
+    thread_root = None
+    thread_parent = None
 
+    for i, post_text in enumerate(posts):
+        segment = f"{i + 1}/{len(posts)}\n{post_text}".strip()
         now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        post = {
+
+        if len(segment.encode("utf-8")) > 300:
+            raise ValueError("Post segment exceeds 300-byte Bluesky limit.")
+
+
+        record = {
             "$type": "app.bsky.feed.post",
-            "text": final_post_segment,
-            "createdAt": now
+            "text": segment,
+            "createdAt": now,
+            "facets": parse_facets(segment)
+        }
+        
+        if thread_root and thread_parent:
+            record["reply"] = {
+                "root": {
+                    "uri": thread_root["uri"],
+                    "cid": thread_root["cid"]
+                },
+                "parent": {
+                    "uri": thread_parent["uri"],
+                    "cid": thread_parent["cid"]
+                }
             }
         
-        resp = requests.post(
+        post_resp = requests.post(
             "https://bsky.social/xrpc/com.atproto.repo.createRecord",
-            headers={"Authorization": "Bearer " + session["accessJwt"]},
+            headers={"Authorization": f"Bearer {access_token}"},
             json={
-                "repo": session["did"],
+                "repo": did,
                 "collection": "app.bsky.feed.post",
-                "record": post,
+                "record": record,
             },
         )
-        print(json.dumps(resp.json(), indent=2))
-        resp.raise_for_status()
 
-        # The full repository path (including the auto-generated rkey) will be returned as a response to the createRecord request. It looks like:
-
-        # {
-        #   "uri": "at://did:plc:u5cwb2mwiv2bfq53cjufe6yn/app.bsky.feed.post/3k4duaz5vfs2b",
-        #   "cid": "bafyreibjifzpqj6o6wcq3hejh7y4z4z2vmiklkvykc57tw3pcbx3kxifpm"
-        # }
-        print(final_post_segment)
-        # client.send_post(text=message)
+        post_resp.raise_for_status()
+        post_data = post_resp.json()
+        print(segment)
+        
+        if i == 0:
+            thread_root = post_data
+        thread_parent = post_data
 
 #BLUESKY API FUNCTIONS
-def parse_mentions(text: str) -> List[Dict]:
+def parse_mentions(text: str) -> list[dict]:
     spans = []
     # regex based on: https://atproto.com/specs/handle#handle-identifier-syntax
     mention_regex = rb"[$|\W](@([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)"
@@ -94,7 +109,7 @@ def parse_mentions(text: str) -> List[Dict]:
         })
     return spans
 
-def parse_urls(text: str) -> List[Dict]:
+def parse_urls(text: str) -> list[dict]:
     spans = []
     # partial/naive URL regex based on: https://stackoverflow.com/a/3809435
     # tweaked to disallow some training punctuation
@@ -107,6 +122,42 @@ def parse_urls(text: str) -> List[Dict]:
             "url": m.group(1).decode("UTF-8"),
         })
     return spans
+
+def parse_facets(text: str) -> list[dict]:
+    facets = []
+
+    for m in parse_mentions(text):
+        resp = requests.get(
+            "https://bsky.social/xrpc/com.atproto.identity.resolveHandle",
+            params={"handle": m["handle"]},
+        )
+        if resp.status_code == 400:
+            continue
+        did = resp.json()["did"]
+        facets.append({
+            "index": {
+                "byteStart": m["start"],
+                "byteEnd": m["end"],
+            },
+            "features": [{
+                "$type": "app.bsky.richtext.facet#mention",
+                "did": did
+            }]
+        })
+
+    for u in parse_urls(text):
+        facets.append({
+            "index": {
+                "byteStart": u["start"],
+                "byteEnd": u["end"],
+            },
+            "features": [{
+                "$type": "app.bsky.richtext.facet#link",
+                "uri": u["url"]
+            }]
+        })
+
+    return facets
 
 #CONGRESS API FUNCTIONS
 def check_DIS():
@@ -412,46 +463,35 @@ def make_final_tweet(billArray, house_text):
         return final_tweet
    
 def make_sub_tweets(finalTweet: str):
-    lines_full_tweet = finalTweet.splitlines()
-    tweet_length = len(finalTweet)
-    print(tweet_length)
+    lines = finalTweet.splitlines()
+    tweet_length = len(finalTweet.encode("utf-8"))
+    print(f"Full byte length: {tweet_length}")
 
-    if (tweet_length > 300):
-        print("Message over 300 characters, splitting into multiple posts")
+    if tweet_length > 300:
+        print("Message over 300 bytes, splitting into multiple posts")
     else:
         print("Message length: ", tweet_length)
 
-    blocks = []
-    current_block = []
-
-    for line in lines_full_tweet:
-        if line.startswith("==") and current_block:
-            blocks.append("\n".join(current_block))
-            current_block = []
-        current_block.append(line)
-
-    if current_block:
-        blocks.append("\n".join(current_block))
-
     posts = []
-    mini_tweet = ""
-    #6 characters of limit reserved for thread count i,e (1/40)
-    character_count = 294
+    current_tweet = ""
+    max_bytes = 290  # Reserve 10 bytes for "1/40" etc.
 
-    for block in blocks:
-        # +1 to account for extra linebreak
-        if len(mini_tweet) + len(block) + 1 >= character_count:
-            posts.append(mini_tweet.strip())
-            mini_tweet = f"{block}\n"
+    for line in lines:
+        # Try to add this line to the current tweet
+        candidate = f"{current_tweet.strip()}\n{line}".strip()
+        byte_len = len(candidate.encode("utf-8"))
+
+        if byte_len > max_bytes:
+            if current_tweet:
+                posts.append(current_tweet.strip())
+            current_tweet = line  # Start new tweet with this line
         else:
-            mini_tweet += f"{block}\n"
+            current_tweet = candidate  # Safe to add this line
 
-    if mini_tweet:
-        posts.append(mini_tweet.strip())
-        mini_tweet = ""
+    if current_tweet:
+        posts.append(current_tweet.strip())
 
     return posts
-
 def main():
     pdf_path = os.path.join(folder_path, f"daily_digest_{day}.{month}.{year}.pdf")
 
