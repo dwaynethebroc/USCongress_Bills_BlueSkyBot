@@ -19,10 +19,9 @@ folder_path = "/Users/brocjohnson/repos/USCongress_Bills_BlueSkyBot/pdf"
 today = datetime.now()
 yesterday = today - timedelta(days = 1)
 year = yesterday.year
-month = 6
-# month = yesterday.month
-#day = yesterday.day
-day = 5
+month = yesterday.month
+day = yesterday.day
+
 
 #BlueSky
 client = Client()
@@ -43,6 +42,9 @@ def post_to_blueSky(message):
     session = session_resp.json()
     access_token = session["accessJwt"]
     did = session["did"]
+    # Fetch the current time
+    # Using a trailing "Z" is preferred over the "+00:00" format
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
     print("Logged in to Bluesky")
 
@@ -52,11 +54,8 @@ def post_to_blueSky(message):
 
     for i, post_text in enumerate(posts):
         segment = f"{i + 1}/{len(posts)}\n{post_text}".strip()
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
         if len(segment.encode("utf-8")) > 300:
-            raise ValueError("Post segment exceeds 300-byte Bluesky limit.")
-
+            raise ValueError(f"Post segment exceeds 300-byte limit:\n{segment}")
 
         record = {
             "$type": "app.bsky.feed.post",
@@ -231,26 +230,27 @@ def extract_text_from_pdf(pdf_file: str) -> str:
         start_flag = "Measures Passed:"
         start_index = cleaned_text.find(start_flag)
         if start_index == -1:
-            return "⚠️ 'Measures Passed:' section not found"
+            print("Senate - 'Measures Passed:' section not found")
+            senate_text = "No bills were passed in the Senate today"
+        else:
+            # Search for the closest *valid* end flag after start
+            end_flags = [
+                "Measures Considered:",
+                "Nominations",
+                "Appointments",
+                "Nomination—Agreement:",
+                "Nomination—Cloture",
+                "Nomination Confirmed:"
+            ]
 
-        # Search for the closest *valid* end flag after start
-        end_flags = [
-            "Measures Considered:",
-            "Nominations",
-            "Appointments",
-            "Nomination—Agreement:",
-            "Nomination—Cloture",
-            "Nomination Confirmed:"
-        ]
+            # Track minimum ending index
+            min_end_index = len(cleaned_text)
+            for flag in end_flags:
+                idx = cleaned_text.find(flag, start_index)
+                if idx != -1 and idx < min_end_index:
+                    min_end_index = idx
 
-        # Track minimum ending index
-        min_end_index = len(cleaned_text)
-        for flag in end_flags:
-            idx = cleaned_text.find(flag, start_index)
-            if idx != -1 and idx < min_end_index:
-                min_end_index = idx
-
-        senate_text = cleaned_text[start_index:min_end_index].strip()
+            senate_text = cleaned_text[start_index:min_end_index].strip()
 
         # === Extract House Section ===
         house_text = ""
@@ -260,6 +260,7 @@ def extract_text_from_pdf(pdf_file: str) -> str:
             house_text = cleaned_text[house_start:house_end].strip() if house_end != -1 else cleaned_text[house_start:]
 
         formatted_house_text = splice_house_text_paragraphs(house_text)
+
 
         return senate_text, formatted_house_text
 
@@ -437,6 +438,11 @@ def make_final_tweet(billArray, house_text):
 
         for fBills in fix_hyphenation_bills:
             match = bill_pattern.search(fBills)
+
+            if not match:
+                print("Skipping bills: no match")
+                final_tweet += "No bills were passed in the Senate today"
+                continue
             bill_type = match.group("prefix")
             bill_number = match.group("number")
 
@@ -462,6 +468,26 @@ def make_final_tweet(billArray, house_text):
         final_tweet += f"\nProject created and maintained here: {githubProjectLink}\n"
         return final_tweet
    
+def split_long_block(text, max_bytes):
+    """Split a single block into multiple strings under max_bytes."""
+    words = text.split()
+    chunks = []
+    current = ""
+
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if len(candidate.encode("utf-8")) > max_bytes:
+            if current:
+                chunks.append(current.strip())
+            current = word
+        else:
+            current = candidate
+
+    if current:
+        chunks.append(current.strip())
+
+    return chunks
+
 def make_sub_tweets(finalTweet: str):
     lines = finalTweet.splitlines()
     tweet_length = len(finalTweet.encode("utf-8"))
@@ -472,26 +498,51 @@ def make_sub_tweets(finalTweet: str):
     else:
         print("Message length: ", tweet_length)
 
-    posts = []
-    current_tweet = ""
-    max_bytes = 290  # Reserve 10 bytes for "1/40" etc.
+    # Step 1: group lines into blocks (each block = 1 bill or intro text)
+    blocks = []
+    current_block = []
 
     for line in lines:
-        # Try to add this line to the current tweet
-        candidate = f"{current_tweet.strip()}\n{line}".strip()
-        byte_len = len(candidate.encode("utf-8"))
+        line = line.strip()
+        if line.startswith("==") and current_block:
+            blocks.append("\n".join(current_block))
+            current_block = []
+        current_block.append(line)
 
-        if byte_len > max_bytes:
-            if current_tweet:
-                posts.append(current_tweet.strip())
-            current_tweet = line  # Start new tweet with this line
+    if current_block:
+        blocks.append("\n".join(current_block))
+
+    # Step 2: assemble posts from blocks, without breaking a block unless necessary
+    posts = []
+    current_post = ""
+    max_bytes = 294  # Reserve 6 bytes for "1/40" etc.
+
+    for block in blocks:
+        block_bytes = len(block.encode("utf-8"))
+
+        # If block is too big to ever fit, split it
+        if block_bytes > max_bytes:
+            print("⚠️ Splitting oversized block...")
+            chunks = split_long_block(block, max_bytes)
+            for chunk in chunks:
+                if current_post:
+                    posts.append(current_post.strip())
+                current_post = chunk
+            continue
+
+        # Try adding the whole block to the current post
+        candidate = f"{current_post.strip()}\n{block}".strip()
+        if len(candidate.encode("utf-8")) > max_bytes:
+            posts.append(current_post.strip())
+            current_post = block
         else:
-            current_tweet = candidate  # Safe to add this line
+            current_post = candidate
 
-    if current_tweet:
-        posts.append(current_tweet.strip())
+    if current_post:
+        posts.append(current_post.strip())
 
     return posts
+
 def main():
     pdf_path = os.path.join(folder_path, f"daily_digest_{day}.{month}.{year}.pdf")
 
@@ -504,8 +555,20 @@ def main():
         if os.path.isfile(pdf_path):
             print("PDF already exists")
 
-            senate_text, house_text = extract_text_from_pdf(pdf_path)
-            bills_senate = make_senate_bills_array(senate_text)
+            extracted = extract_text_from_pdf(pdf_path)
+            # Handle unexpected return (like an error string)
+            if not isinstance(extracted, tuple):
+                print(f"❌ Failed to extract text: {extracted}")
+                return
+
+            senate_text, house_text = extracted
+
+            # Skip if both are empty
+            if not senate_text and not house_text:
+                print("❌ No bill data found in the PDF. Skipping post.")
+                return
+
+            bills_senate = make_senate_bills_array(senate_text) if senate_text else []
             final_tweet = make_final_tweet(bills_senate, house_text)
 
             post_to_blueSky(final_tweet)
@@ -514,7 +577,6 @@ def main():
             print("PDF does not exist")
 
             url = build_url_daily_digest()
-            print(url)
             response = requests.get(url)
 
 
