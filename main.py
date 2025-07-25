@@ -6,6 +6,8 @@ import os
 import json
 import requests
 import re
+import time
+import schedule
 from atproto import Client
 
 #load env variables
@@ -17,11 +19,12 @@ folder_path = "/Users/brocjohnson/repos/USCongress_Bills_BlueSkyBot/pdf"
 
 #get the current day
 today = datetime.now()
-yesterday = today - timedelta(days = 1)
+
+#get yesterdays date from today - 2, because 1 day was not enough time for the daily digest to be uploaded
+yesterday = today - timedelta(days = 2)
 year = yesterday.year
 month = yesterday.month
 day = yesterday.day
-
 
 #BlueSky
 client = Client()
@@ -571,12 +574,14 @@ def main():
             bills_senate = make_senate_bills_array(senate_text) if senate_text else []
             final_tweet = make_final_tweet(bills_senate, house_text)
 
+            #Need function to determine if final tweets has already been posted to BlueSky this day 
             post_to_blueSky(final_tweet)
             
         else:
             print("PDF does not exist")
 
             url = build_url_daily_digest()
+            print(url)
             response = requests.get(url)
 
 
@@ -609,5 +614,13 @@ def main():
 
 # ==== Main Program ====
 if __name__ == "__main__":
-    main()
+    #Everyday at noon, run the python script to see if yesterday was a day in Congress
+    schedule.every().day.at("12:01").do(main)
+
+
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
+
+    # main()
 
