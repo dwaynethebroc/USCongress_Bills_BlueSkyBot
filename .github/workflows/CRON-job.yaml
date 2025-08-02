@@ -20,6 +20,7 @@ jobs:
         env:
           BSKY_USERNAME: ${{ secrets.BSKY_USERNAME }}
           BSKY_PASSWORD: ${{ secrets.BSKY_PASSWORD }}
+          GOV_API_KEY: ${{ secrets.GOV_API_KEY }}
         run: python main.py
       
         
