@@ -1,19 +1,26 @@
 name: CRON-Job BlueSky Bot
 on: 
   schedule:
+  #everyday at 12pm
   - cron: '0 12 * * *'
 
 jobs:
   build: 
     runs-on: ubuntu-latest
     steps:
-      - uses: action/cehckout@v2
-      - uses: action/setup-python@v2
+      - name: checkout code
+      - uses: actions/cehckout@v2
+      #setup python environment
+      - name: python environment
+      - uses: actions/setup-python@v2
         with: 
-          python-version: 3.x
-      -name: Run email code
+          python-version: 3.11
+      #run my script
+      - name: Run BlueSky Bot
+        env:
+          BSKY_USERNAME: ${{ secrets.BSKY_USERNAME }}
+          BSKY_PASSWORD: ${{ secrets.BSKY_PASSWORD }}
         run: python main.py
-        
       
         
     
