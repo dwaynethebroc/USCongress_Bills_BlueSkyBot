@@ -6,8 +6,6 @@ import os
 import json
 import requests
 import re
-import time
-import schedule
 from atproto import Client
 
 #load env variables
@@ -614,13 +612,5 @@ def main():
 
 # ==== Main Program ====
 if __name__ == "__main__":
-    #Everyday at noon, run the python script to see if yesterday was a day in Congress
-    schedule.every().day.at("12:01").do(main)
-
-
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
-
-    # main()
+    main()
 
