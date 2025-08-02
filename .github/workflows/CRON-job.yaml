@@ -4,10 +4,17 @@ on:
   - cron: '0 12 * * *'
 
 jobs:
-  my-job: 
+  build: 
     runs-on: ubuntu-latest
     steps:
-      - name: first-step
-        run: echo "hello world"
+      - uses: action/cehckout@v2
+      - uses: action/setup-python@v2
+        with: 
+          python-version: 3.x
+      -name: Run email code
+        run: python main.py
+        
+      
+        
     
   
